@@ -9,7 +9,7 @@ body {
   padding: 10px;
   background: white;
   border-radius: 5px;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 button {
   background-color: #ff0000;
@@ -24,7 +24,9 @@ button {
 button:hover {
   opacity: 0.8;
 }
-input[type="text"], input[type="password"], select {
+input[type="text"],
+input[type="password"],
+select {
   width: 100%;
   padding: 5px;
   margin-top: 5px;
@@ -38,7 +40,14 @@ label {
   font-size: 13px;
   font-weight: bold;
 }
-h3, h4 {
+h3,
+h4 {
   margin-top: 0;
   margin-bottom: 10px;
+}
+
+.value-text {
+  font-size: 12px;
+  color: #666;
+  margin-top: 2px;
 }
