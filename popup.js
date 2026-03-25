@@ -5,6 +5,9 @@ document.addEventListener("DOMContentLoaded", () => {
   const translateBtn = document.getElementById("translate-btn");
   const readAloud = document.getElementById("read-aloud");
   const hideSourceText = document.getElementById("hide-source-text");
+  const adaptiveOverlayPosition = document.getElementById(
+    "adaptive-overlay-position",
+  );
   const sonioxKey = document.getElementById("soniox-key");
   const fontSize = document.getElementById("font-size");
   const fontSizeValue = document.getElementById("font-size-value");
@@ -86,6 +89,7 @@ document.addEventListener("DOMContentLoaded", () => {
       targetLang: targetLang.value,
       readAloud: readAloud.checked,
       hideSourceText: hideSourceText.checked,
+      adaptiveOverlayPosition: adaptiveOverlayPosition.checked,
       sourceTextFactor: Number(sourceSizeFactor.value),
       targetTextFactor: Number(targetSizeFactor.value),
       sonioxKey: sonioxKey.value,
@@ -105,6 +109,7 @@ document.addEventListener("DOMContentLoaded", () => {
       "targetLang",
       "readAloud",
       "hideSourceText",
+      "adaptiveOverlayPosition",
       "sourceTextFactor",
       "targetTextFactor",
       "sonioxKey",
@@ -122,6 +127,9 @@ document.addEventListener("DOMContentLoaded", () => {
       if (res.readAloud !== undefined) readAloud.checked = res.readAloud;
       if (res.hideSourceText !== undefined)
         hideSourceText.checked = res.hideSourceText;
+      if (res.adaptiveOverlayPosition !== undefined) {
+        adaptiveOverlayPosition.checked = res.adaptiveOverlayPosition;
+      }
       if (res.sourceTextFactor !== undefined)
         sourceSizeFactor.value = String(res.sourceTextFactor);
       if (res.targetTextFactor !== undefined)
@@ -151,6 +159,7 @@ document.addEventListener("DOMContentLoaded", () => {
       targetLang: settings.targetLang,
       readAloud: settings.readAloud,
       hideSourceText: settings.hideSourceText,
+      adaptiveOverlayPosition: settings.adaptiveOverlayPosition,
       sourceTextFactor: settings.sourceTextFactor,
       targetTextFactor: settings.targetTextFactor,
       sonioxKey: settings.sonioxKey,
@@ -186,6 +195,7 @@ document.addEventListener("DOMContentLoaded", () => {
   targetLang.addEventListener("change", saveSettings);
   readAloud.addEventListener("change", saveSettings);
   hideSourceText.addEventListener("change", saveSettings);
+  adaptiveOverlayPosition.addEventListener("change", saveSettings);
   sonioxKey.addEventListener("input", saveSettings);
   fontSize.addEventListener("input", saveSettings);
   textColor.addEventListener("input", saveSettings);
@@ -210,6 +220,7 @@ document.addEventListener("DOMContentLoaded", () => {
         targetLang: settings.targetLang,
         readAloud: settings.readAloud,
         hideSourceText: settings.hideSourceText,
+        adaptiveOverlayPosition: settings.adaptiveOverlayPosition,
         sourceTextFactor: settings.sourceTextFactor,
         targetTextFactor: settings.targetTextFactor,
         style: settings.style,

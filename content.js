@@ -6,17 +6,24 @@ let readAloudEnabled = false;
 let hideSourceText = false;
 let sourceTextFactor = 0.8;
 let targetTextFactor = 1.2;
+let adaptiveOverlayPosition = true;
 let captionObserver = null;
+let playerUiObserver = null;
+let playerUiListeners = [];
+let playerUiUpdateTimer = null;
 let translatedHistory = [];
 let currentStyle = { fontSize: "24", textColor: "#ffffff", bgOpacity: "75" };
 let lastOriginalText = "";
+let lastOverlayBottom = "";
 
 // Handle SPA navigation on YouTube
 document.addEventListener("yt-navigate-finish", () => {
   if (isTranslating) {
     translatedHistory = [];
     lastOriginalText = "";
+    teardownPlayerUiTracking();
     setupObserver();
+    refreshOverlayPositionSoon();
   }
 });
 
@@ -30,6 +37,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     hideSourceText = Boolean(request.hideSourceText);
     sourceTextFactor = Number(request.sourceTextFactor || 0.8);
     targetTextFactor = Number(request.targetTextFactor || 1.2);
+    adaptiveOverlayPosition = request.adaptiveOverlayPosition !== false;
     if (request.style) {
       currentStyle = request.style;
     }
@@ -77,9 +85,130 @@ function applySettings(settings) {
     targetTextFactor = Number(settings.targetTextFactor);
   if (settings.translationEnabled !== undefined)
     translationEnabled = Boolean(settings.translationEnabled);
+  if (settings.adaptiveOverlayPosition !== undefined) {
+    adaptiveOverlayPosition = Boolean(settings.adaptiveOverlayPosition);
+  }
   if (settings.style) currentStyle = settings.style;
 
   updateOverlayStyle();
+}
+
+function isControlsVisible() {
+  const player = document.querySelector("#movie_player");
+  if (!player) return false;
+
+  const controls = player.querySelector(
+    ".ytp-chrome-bottom, .ytp-player-controls, .ytp-chrome-controls",
+  );
+  if (!controls) return false;
+
+  const style = window.getComputedStyle(controls);
+  const rect = controls.getBoundingClientRect();
+  const hiddenByClass =
+    player.classList.contains("ytp-autohide") ||
+    player.classList.contains("ytp-hide-controls");
+  const hasSize = rect.width > 0 && rect.height > 6;
+  const visibleByStyle =
+    style.display !== "none" &&
+    style.visibility !== "hidden" &&
+    Number(style.opacity || "1") > 0.01;
+
+  return hasSize && visibleByStyle && !hiddenByClass;
+}
+
+function isPlayerControlsActive() {
+  const videoEl = document.querySelector("video");
+  if (videoEl && videoEl.paused) {
+    return true;
+  }
+  return isControlsVisible();
+}
+
+function getOverlayBottomOffset() {
+  if (!adaptiveOverlayPosition) {
+    return "15%";
+  }
+
+  return isPlayerControlsActive() ? "72px" : "6%";
+}
+
+function refreshOverlayPositionSoon() {
+  if (playerUiUpdateTimer !== null) return;
+  playerUiUpdateTimer = window.setTimeout(() => {
+    playerUiUpdateTimer = null;
+    updateOverlayStyle();
+  }, 50);
+}
+
+function teardownPlayerUiTracking() {
+  if (captionObserver) {
+    captionObserver.disconnect();
+    captionObserver = null;
+  }
+
+  if (playerUiObserver) {
+    playerUiObserver.disconnect();
+    playerUiObserver = null;
+  }
+
+  playerUiListeners.forEach(({ element, eventName }) => {
+    element.removeEventListener(eventName, refreshOverlayPositionSoon);
+  });
+  playerUiListeners = [];
+
+  if (playerUiUpdateTimer !== null) {
+    window.clearTimeout(playerUiUpdateTimer);
+    playerUiUpdateTimer = null;
+  }
+}
+
+function bindPlayerUiTracking(player, videoEl) {
+  teardownPlayerUiTracking();
+
+  const playerEvents = [
+    "mousemove",
+    "mouseenter",
+    "mouseleave",
+    "touchstart",
+    "touchend",
+  ];
+  const videoEvents = ["play", "pause", "seeking", "seeked", "timeupdate"];
+
+  playerEvents.forEach((eventName) => {
+    if (!player) return;
+    player.addEventListener(eventName, refreshOverlayPositionSoon, {
+      passive: true,
+    });
+    playerUiListeners.push({ element: player, eventName });
+  });
+
+  videoEvents.forEach((eventName) => {
+    if (!videoEl) return;
+    videoEl.addEventListener(eventName, refreshOverlayPositionSoon, {
+      passive: true,
+    });
+    playerUiListeners.push({ element: videoEl, eventName });
+  });
+
+  if (player) {
+    playerUiObserver = new MutationObserver(refreshOverlayPositionSoon);
+    playerUiObserver.observe(player, {
+      attributes: true,
+      attributeFilter: ["class"],
+      subtree: false,
+    });
+
+    const controls = player.querySelector(
+      ".ytp-chrome-bottom, .ytp-player-controls, .ytp-chrome-controls",
+    );
+    if (controls) {
+      playerUiObserver.observe(controls, {
+        attributes: true,
+        attributeFilter: ["class", "style"],
+        subtree: false,
+      });
+    }
+  }
 }
 
 function createOverlay() {
@@ -97,7 +226,11 @@ function updateOverlayStyle() {
   const overlay = document.getElementById("yt-translate-overlay");
   if (overlay) {
     overlay.style.position = "absolute";
-    overlay.style.bottom = "15%";
+    const overlayBottom = getOverlayBottomOffset();
+    if (overlayBottom !== lastOverlayBottom) {
+      overlay.style.bottom = overlayBottom;
+      lastOverlayBottom = overlayBottom;
+    }
     overlay.style.left = "50%";
     overlay.style.transform = "translateX(-50%)";
     overlay.style.textAlign = "center";
@@ -191,14 +324,18 @@ function speakText(text) {
 }
 
 function setupObserver() {
-  if (captionObserver) {
-    captionObserver.disconnect();
-  }
+  teardownPlayerUiTracking();
 
   const captionContainer = document.querySelector(
     ".ytp-caption-window-container",
   );
+  const player = document.querySelector("#movie_player");
+  const videoEl = document.querySelector("video");
+
+  bindPlayerUiTracking(player, videoEl);
+
   if (!captionContainer) {
+    refreshOverlayPositionSoon();
     setTimeout(setupObserver, 1000);
     return;
   }
@@ -244,6 +381,8 @@ function setupObserver() {
     subtree: true,
     characterData: true,
   });
+
+  refreshOverlayPositionSoon();
 }
 
 function hideOriginalCaptions() {
