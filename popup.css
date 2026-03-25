@@ -302,6 +302,41 @@ input[type="range"]::-webkit-slider-thumb {
   cursor: pointer;
 }
 
+/* ── Bold row ── */
+.bold-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.bold-group {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.bold-btn {
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  border: none;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.bold-btn + .bold-btn {
+  border-left: 1px solid var(--border);
+}
+
+.bold-btn.active {
+  background: var(--accent-red);
+  color: #fff;
+}
+
 /* ── Color row ── */
 .color-row {
   display: flex;

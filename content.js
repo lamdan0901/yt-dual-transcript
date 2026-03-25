@@ -6,6 +6,7 @@ let readAloudEnabled = false;
 let hideSourceText = false;
 let sourceTextFactor = 0.8;
 let targetTextFactor = 1.2;
+let boldText = "target";
 let adaptiveOverlayPosition = true;
 let captionObserver = null;
 let playerUiObserver = null;
@@ -37,6 +38,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     hideSourceText = Boolean(request.hideSourceText);
     sourceTextFactor = Number(request.sourceTextFactor || 0.8);
     targetTextFactor = Number(request.targetTextFactor || 1.2);
+    boldText = request.boldText || "target";
     adaptiveOverlayPosition = request.adaptiveOverlayPosition !== false;
     if (request.style) {
       currentStyle = request.style;
@@ -88,6 +90,7 @@ function applySettings(settings) {
   if (settings.adaptiveOverlayPosition !== undefined) {
     adaptiveOverlayPosition = Boolean(settings.adaptiveOverlayPosition);
   }
+  if (settings.boldText) boldText = settings.boldText;
   if (settings.style) currentStyle = settings.style;
 
   updateOverlayStyle();
@@ -273,12 +276,17 @@ function updateOverlayText(original, translated) {
     const safeOriginal = escapeHtml(original);
     const safeTranslated = escapeHtml(translated);
 
+    const sourceBold = boldText === "source" || boldText === "both";
+    const targetBold = boldText === "target" || boldText === "both";
+    const sourceStyle = `font-size: ${sourceSize}px; opacity: ${sourceBold ? "1" : "0.7"}; font-weight: ${sourceBold ? "bold" : "normal"}; margin-bottom: 4px;`;
+    const targetStyle = `font-size: ${targetSize}px; opacity: ${targetBold ? "1" : "0.7"}; font-weight: ${targetBold ? "bold" : "normal"};`;
+
     if (hideSourceText) {
-      overlay.innerHTML = `<div class="translated-text" style="font-weight: bold; font-size: ${targetSize}px;">${safeTranslated}</div>`;
+      overlay.innerHTML = `<div class="translated-text" style="${targetStyle}">${safeTranslated}</div>`;
     } else {
       overlay.innerHTML = `
-        <div class="original-text" style="font-size: ${sourceSize}px; opacity: 0.85; margin-bottom: 4px;">${safeOriginal}</div>
-        <div class="translated-text" style="font-weight: bold; font-size: ${targetSize}px;">${safeTranslated}</div>
+        <div class="original-text" style="${sourceStyle}">${safeOriginal}</div>
+        <div class="translated-text" style="${targetStyle}">${safeTranslated}</div>
       `;
     }
   }

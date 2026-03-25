@@ -18,9 +18,20 @@ document.addEventListener("DOMContentLoaded", () => {
   const sourceSizeValue = document.getElementById("source-size-value");
   const targetSizeFactor = document.getElementById("target-size-factor");
   const targetSizeValue = document.getElementById("target-size-value");
+  const boldBtns = document.querySelectorAll(".bold-btn");
   const downloadSrtBtn = document.getElementById("download-srt-btn");
   const startSttBtn = document.getElementById("start-stt-btn");
   let preferredSourceLang = "auto";
+  let boldText = "target";
+
+  boldBtns.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      boldBtns.forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+      boldText = btn.dataset.value;
+      saveSettings();
+    });
+  });
 
   function setValueLabels() {
     fontSizeValue.textContent = `${fontSize.value}px`;
@@ -92,6 +103,7 @@ document.addEventListener("DOMContentLoaded", () => {
       adaptiveOverlayPosition: adaptiveOverlayPosition.checked,
       sourceTextFactor: Number(sourceSizeFactor.value),
       targetTextFactor: Number(targetSizeFactor.value),
+      boldText,
       sonioxKey: sonioxKey.value,
       style: {
         fontSize: fontSize.value,
@@ -113,6 +125,7 @@ document.addEventListener("DOMContentLoaded", () => {
       "sourceTextFactor",
       "targetTextFactor",
       "sonioxKey",
+      "boldText",
       "style",
     ],
     (res) => {
@@ -137,6 +150,12 @@ document.addEventListener("DOMContentLoaded", () => {
       if (res.sonioxKey) {
         sonioxKey.value = res.sonioxKey;
         startSttBtn.style.display = "block";
+      }
+      if (res.boldText) {
+        boldText = res.boldText;
+        boldBtns.forEach((b) => {
+          b.classList.toggle("active", b.dataset.value === res.boldText);
+        });
       }
       if (res.style) {
         if (res.style.fontSize) fontSize.value = res.style.fontSize;
@@ -163,6 +182,7 @@ document.addEventListener("DOMContentLoaded", () => {
       sourceTextFactor: settings.sourceTextFactor,
       targetTextFactor: settings.targetTextFactor,
       sonioxKey: settings.sonioxKey,
+      boldText: settings.boldText,
       style: settings.style,
     });
 
