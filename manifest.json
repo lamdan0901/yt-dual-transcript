@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube Translate & Speak",
+  "version": "1.0",
+  "description": "Translate YouTube subtitles into 90+ languages with bilingual display and text-to-speech.",
+  "permissions": [
+    "storage",
+    "tabCapture",
+    "tts"
+  ],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "https://translate.googleapis.com/*",
+    "https://api.soniox.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Translate Options"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

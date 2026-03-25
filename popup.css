@@ -1,0 +1,44 @@
+body {
+  width: 300px;
+  font-family: Arial, sans-serif;
+  padding: 10px;
+  background-color: #f9f9f9;
+}
+.section {
+  margin-bottom: 15px;
+  padding: 10px;
+  background: white;
+  border-radius: 5px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+button {
+  background-color: #ff0000;
+  color: white;
+  border: none;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-radius: 4px;
+  width: 100%;
+  font-weight: bold;
+}
+button:hover {
+  opacity: 0.8;
+}
+input[type="text"], input[type="password"], select {
+  width: 100%;
+  padding: 5px;
+  margin-top: 5px;
+  box-sizing: border-box;
+}
+input[type="range"] {
+  width: 100%;
+  margin-top: 5px;
+}
+label {
+  font-size: 13px;
+  font-weight: bold;
+}
+h3, h4 {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
