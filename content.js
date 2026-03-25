@@ -16,12 +16,24 @@ let translatedHistory = [];
 let currentStyle = { fontSize: "24", textColor: "#ffffff", bgOpacity: "75" };
 let lastOriginalText = "";
 let lastOverlayBottom = "";
+let rollingOriginal = "";      // accumulated display buffer
+let rollingTranslated = "";
+let lastSegOriginal = "";      // last raw segment text (for grow-detection)
+let lastSegTranslated = "";
+let isLineShiftAnimating = false;
+let pendingDisplayUpdate = false; // flag: re-render after animation ends
 
 // Handle SPA navigation on YouTube
 document.addEventListener("yt-navigate-finish", () => {
   if (isTranslating) {
     translatedHistory = [];
     lastOriginalText = "";
+    rollingOriginal = "";
+    rollingTranslated = "";
+    lastSegOriginal = "";
+    lastSegTranslated = "";
+    isLineShiftAnimating = false;
+    pendingDisplayUpdate = false;
     teardownPlayerUiTracking();
     setupObserver();
     refreshOverlayPositionSoon();
@@ -236,7 +248,9 @@ function updateOverlayStyle() {
     }
     overlay.style.left = "50%";
     overlay.style.transform = "translateX(-50%)";
-    overlay.style.textAlign = "center";
+    overlay.style.maxWidth = "50%";
+    overlay.style.width = "max-content";
+    overlay.style.textAlign = "left";
     overlay.style.zIndex = "9999";
     overlay.style.pointerEvents = "none";
     overlay.style.fontSize = `${currentStyle.fontSize}px`;
@@ -249,8 +263,78 @@ function updateOverlayStyle() {
     overlay.style.borderRadius = "5px";
     overlay.style.display = translationEnabled ? "flex" : "none";
     overlay.style.flexDirection = "column";
-    overlay.style.alignItems = "center";
+    overlay.style.alignItems = "flex-start";
   }
+}
+
+function getMeasurer() {
+  let measurer = document.getElementById("yt-translate-measurer");
+  if (!measurer) {
+    measurer = document.createElement("div");
+    measurer.id = "yt-translate-measurer";
+    measurer.style.cssText =
+      "position:absolute;visibility:hidden;pointer-events:none;white-space:pre-wrap;word-break:break-word;text-align:left;";
+    document.body.appendChild(measurer);
+  }
+  return measurer;
+}
+
+function trimFirstVisualLine(text, referenceEl, lineHeight) {
+  if (!text || !referenceEl) return text;
+  const measurer = getMeasurer();
+  measurer.style.width = (referenceEl.offsetWidth || 400) + "px";
+  measurer.style.fontSize = referenceEl.style.fontSize;
+  measurer.style.lineHeight = lineHeight + "px";
+
+  // Binary search: find the last char index that fits on exactly 1 line
+  let lo = 1, hi = text.length;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    measurer.textContent = text.slice(0, mid);
+    if (measurer.scrollHeight <= lineHeight + 2) lo = mid;
+    else hi = mid - 1;
+  }
+
+  // Advance to next word boundary
+  let cut = lo;
+  while (cut < text.length && text[cut] !== " ") cut++;
+  while (cut < text.length && text[cut] === " ") cut++;
+
+  return cut < text.length ? text.slice(cut) : "";
+}
+
+function animateLineShift(origInner, transInner, sourceLineH, targetLineH) {
+  const DURATION = 250;
+  if (origInner && !hideSourceText) {
+    origInner.style.transition = `transform ${DURATION}ms ease`;
+    origInner.style.transform = `translateY(-${sourceLineH}px)`;
+  }
+  if (transInner) {
+    transInner.style.transition = `transform ${DURATION}ms ease`;
+    transInner.style.transform = `translateY(-${targetLineH}px)`;
+  }
+
+  setTimeout(() => {
+    if (origInner && !hideSourceText) {
+      rollingOriginal = trimFirstVisualLine(rollingOriginal, origInner, sourceLineH);
+      origInner.style.transition = "none";
+      origInner.style.transform = "";
+      origInner.textContent = rollingOriginal;
+    }
+    if (transInner) {
+      rollingTranslated = trimFirstVisualLine(rollingTranslated, transInner, targetLineH);
+      transInner.style.transition = "none";
+      transInner.style.transform = "";
+      transInner.textContent = rollingTranslated;
+    }
+    isLineShiftAnimating = false;
+
+    // Re-render with the latest rolling buffers (may have grown during animation)
+    if (pendingDisplayUpdate) {
+      pendingDisplayUpdate = false;
+      updateOverlayText(rollingOriginal, rollingTranslated, true);
+    }
+  }, DURATION + 10);
 }
 
 function escapeHtml(text) {
@@ -262,32 +346,97 @@ function escapeHtml(text) {
     .replace(/'/g, "&#39;");
 }
 
-function updateOverlayText(original, translated) {
+function updateOverlayText(original, translated, triggerOverflowCheck = false) {
+  if (isLineShiftAnimating) {
+    // Don't store a snapshot — just flag that a re-render is needed after animation.
+    // rollingOriginal / rollingTranslated are always current.
+    pendingDisplayUpdate = true;
+    return;
+  }
+
   const overlay = document.getElementById("yt-translate-overlay");
-  if (overlay) {
-    if (!translationEnabled) {
-      overlay.style.display = "none";
-      return;
+  if (!overlay) return;
+  if (!translationEnabled) { overlay.style.display = "none"; return; }
+
+  const baseSize = Number(currentStyle.fontSize || 24);
+  const sourceSize = Math.max(10, Math.round(baseSize * sourceTextFactor));
+  const targetSize = Math.max(12, Math.round(baseSize * targetTextFactor));
+  const sourceLineH = Math.round(sourceSize * 1.4);
+  const targetLineH = Math.round(targetSize * 1.4);
+  const sourceBold = boldText === "source" || boldText === "both";
+  const targetBold = boldText === "target" || boldText === "both";
+
+  // Build wrapper structure once
+  let origWrapper = document.getElementById("yt-original-wrapper");
+  let origInner = document.getElementById("yt-original-inner");
+  let transWrapper = document.getElementById("yt-translated-wrapper");
+  let transInner = document.getElementById("yt-translated-inner");
+
+  if (!transInner) {
+    overlay.innerHTML = "";
+    isLineShiftAnimating = false;
+    if (!hideSourceText) {
+      origWrapper = document.createElement("div");
+      origWrapper.id = "yt-original-wrapper";
+      origInner = document.createElement("div");
+      origInner.id = "yt-original-inner";
+      origWrapper.appendChild(origInner);
+      overlay.appendChild(origWrapper);
     }
+    transWrapper = document.createElement("div");
+    transWrapper.id = "yt-translated-wrapper";
+    transInner = document.createElement("div");
+    transInner.id = "yt-translated-inner";
+    transWrapper.appendChild(transInner);
+    overlay.appendChild(transWrapper);
+  }
 
-    const baseSize = Number(currentStyle.fontSize || 24);
-    const sourceSize = Math.max(10, Math.round(baseSize * sourceTextFactor));
-    const targetSize = Math.max(12, Math.round(baseSize * targetTextFactor));
-    const safeOriginal = escapeHtml(original);
-    const safeTranslated = escapeHtml(translated);
+  // Update wrapper sizes & visibility
+  if (origWrapper) {
+    origWrapper.style.overflow = "hidden";
+    origWrapper.style.width = "100%";
+    origWrapper.style.marginBottom = "4px";
+    origWrapper.style.height = 2 * sourceLineH + "px";
+    origWrapper.style.display = hideSourceText ? "none" : "block";
+  }
+  if (transWrapper) {
+    transWrapper.style.overflow = "hidden";
+    transWrapper.style.width = "100%";
+    transWrapper.style.height = 2 * targetLineH + "px";
+  }
 
-    const sourceBold = boldText === "source" || boldText === "both";
-    const targetBold = boldText === "target" || boldText === "both";
-    const sourceStyle = `font-size: ${sourceSize}px; opacity: ${sourceBold ? "1" : "0.7"}; font-weight: ${sourceBold ? "bold" : "normal"}; margin-bottom: 4px;`;
-    const targetStyle = `font-size: ${targetSize}px; opacity: ${targetBold ? "1" : "0.7"}; font-weight: ${targetBold ? "bold" : "normal"};`;
+  // Update inner styles & content (don't touch transform — animation owns it)
+  if (origInner) {
+    origInner.style.fontSize = sourceSize + "px";
+    origInner.style.opacity = sourceBold ? "1" : "0.7";
+    origInner.style.fontWeight = sourceBold ? "bold" : "normal";
+    origInner.style.lineHeight = sourceLineH + "px";
+    origInner.style.whiteSpace = "pre-wrap";
+    origInner.style.wordBreak = "break-word";
+    origInner.textContent = original;
+  }
+  if (transInner) {
+    transInner.style.fontSize = targetSize + "px";
+    transInner.style.opacity = targetBold ? "1" : "0.7";
+    transInner.style.fontWeight = targetBold ? "bold" : "normal";
+    transInner.style.lineHeight = targetLineH + "px";
+    transInner.style.whiteSpace = "pre-wrap";
+    transInner.style.wordBreak = "break-word";
+    transInner.textContent = translated;
+  }
 
-    if (hideSourceText) {
-      overlay.innerHTML = `<div class="translated-text" style="${targetStyle}">${safeTranslated}</div>`;
-    } else {
-      overlay.innerHTML = `
-        <div class="original-text" style="${sourceStyle}">${safeOriginal}</div>
-        <div class="translated-text" style="${targetStyle}">${safeTranslated}</div>
-      `;
+  // Only check overflow at segment boundaries to avoid mid-word animation
+  if (triggerOverflowCheck && !isLineShiftAnimating) {
+    const origOverflows = origInner && !hideSourceText && origInner.scrollHeight > 2 * sourceLineH + 2;
+    const transOverflows = transInner && transInner.scrollHeight > 2 * targetLineH + 2;
+    if (origOverflows || transOverflows) {
+      isLineShiftAnimating = true;
+      animateLineShift(
+        origOverflows ? origInner : null,
+        transOverflows ? transInner : null,
+        sourceLineH,
+        targetLineH,
+      );
     }
   }
 }
@@ -297,6 +446,12 @@ function clearOverlayText() {
   if (overlay) {
     overlay.innerHTML = "";
   }
+  rollingOriginal = "";
+  rollingTranslated = "";
+  lastSegOriginal = "";
+  lastSegTranslated = "";
+  isLineShiftAnimating = false;
+  pendingDisplayUpdate = false;
 }
 
 function hideOverlay() {
@@ -363,22 +518,80 @@ function setupObserver() {
     currentText = currentText.trim();
 
     if (currentText && currentText !== lastOriginalText) {
-      lastOriginalText = currentText;
-      const translated = await translateText(currentText);
-      updateOverlayText(currentText, translated);
-      speakText(translated);
+      const prevSeg = lastSegOriginal;
+      // Growing = the new text is an extension of the previous caption text
+      const isGrowing = !!prevSeg && currentText.startsWith(prevSeg);
 
-      const videoEl = document.querySelector("video");
-      const currentTime = videoEl ? videoEl.currentTime : 0;
-      translatedHistory.push({
-        start: currentTime,
-        end: currentTime + 2, // Approximation
-        original: currentText,
-        translated: translated,
-      });
+      if (isGrowing) {
+        // ── Word added to current segment ──────────────────────────────────
+        // Append only the delta (new words) so animation-trimmed rollingOriginal
+        // is never overwritten with a stale full-segment reconstruction.
+        const addition = currentText.slice(prevSeg.length).trimStart();
+        lastOriginalText = currentText;
+        lastSegOriginal = currentText;
+
+        if (addition) {
+          rollingOriginal = rollingOriginal
+            ? rollingOriginal + " " + addition
+            : addition;
+          // Update original line immediately — no translation, no flicker
+          updateOverlayText(rollingOriginal, rollingTranslated, true);
+        }
+      } else {
+        // ── New segment detected ────────────────────────────────────────────
+        // prevSeg (if any) is now fully complete — translate it.
+        // currentText is the first word(s) of the brand-new segment.
+        lastOriginalText = currentText;
+        lastSegOriginal = currentText;
+
+        // Show the new segment's first word(s) in the original line immediately
+        rollingOriginal = rollingOriginal
+          ? rollingOriginal + " " + currentText
+          : currentText;
+        updateOverlayText(rollingOriginal, rollingTranslated, true);
+
+        if (prevSeg) {
+          // Fire-and-forget: translate the completed segment, then update
+          // the translated line. Original line keeps growing independently.
+          (async () => {
+            const translated = await translateText(prevSeg);
+            lastSegTranslated = translated;
+            rollingTranslated = rollingTranslated
+              ? rollingTranslated + " " + translated
+              : translated;
+            updateOverlayText(rollingOriginal, rollingTranslated, true);
+            speakText(translated);
+
+            const vid = document.querySelector("video");
+            const t = vid ? vid.currentTime : 0;
+            translatedHistory.push({
+              start: t,
+              end: t + 2,
+              original: prevSeg,
+              translated,
+            });
+          })();
+        }
+      }
 
       hideOriginalCaptions();
     } else if (!currentText && lastOriginalText !== "") {
+      // Captions cleared — commit the last in-progress segment to history
+      if (lastSegOriginal) {
+        const finalSeg = lastSegOriginal;
+        (async () => {
+          const translated = await translateText(finalSeg);
+          speakText(translated);
+          const vid = document.querySelector("video");
+          const t = vid ? vid.currentTime : 0;
+          translatedHistory.push({
+            start: t,
+            end: t + 2,
+            original: finalSeg,
+            translated,
+          });
+        })();
+      }
       clearOverlayText();
       lastOriginalText = "";
     }
