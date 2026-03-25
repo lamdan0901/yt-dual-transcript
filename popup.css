@@ -207,6 +207,22 @@ select option {
   border-top: 1px solid var(--border);
 }
 
+.compact-field-row {
+  margin-top: 10px;
+}
+
+.field-help {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+#azure-voice-name:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* ── Buttons ── */
 button {
   width: 100%;

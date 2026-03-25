@@ -11,7 +11,8 @@
   "host_permissions": [
     "*://*.youtube.com/*",
     "https://translate.googleapis.com/*",
-    "https://api.soniox.com/*"
+    "https://api.soniox.com/*",
+    "https://*.tts.speech.microsoft.com/*"
   ],
   "icons": {
     "16": "icons/icon16.png",

@@ -4,11 +4,15 @@ document.addEventListener("DOMContentLoaded", () => {
   const targetLang = document.getElementById("target-lang");
   const translateBtn = document.getElementById("translate-btn");
   const readAloud = document.getElementById("read-aloud");
+  const ttsProvider = document.getElementById("tts-provider");
+  const azureVoiceName = document.getElementById("azure-voice-name");
   const hideSourceText = document.getElementById("hide-source-text");
   const adaptiveOverlayPosition = document.getElementById(
     "adaptive-overlay-position",
   );
   const sonioxKey = document.getElementById("soniox-key");
+  const azureSpeechKey = document.getElementById("azure-speech-key");
+  const azureSpeechRegion = document.getElementById("azure-speech-region");
   const fontSize = document.getElementById("font-size");
   const fontSizeValue = document.getElementById("font-size-value");
   const textColor = document.getElementById("text-color");
@@ -23,6 +27,99 @@ document.addEventListener("DOMContentLoaded", () => {
   const startSttBtn = document.getElementById("start-stt-btn");
   let preferredSourceLang = "auto";
   let boldText = "target";
+  let availableAzureVoices = [];
+
+  function normalizeLangTag(lang) {
+    if (!lang || typeof lang !== "string") return "";
+    const parts = lang.trim().replace(/_/g, "-").split("-").filter(Boolean);
+    if (parts.length === 0) return "";
+    return parts
+      .map((part, index) => {
+        if (index === 0) return part.toLowerCase();
+        if (part.length === 2) return part.toUpperCase();
+        if (part.length === 4) {
+          return part[0].toUpperCase() + part.slice(1).toLowerCase();
+        }
+        return part.toLowerCase();
+      })
+      .join("-");
+  }
+
+  function getVoiceDisplayName(voice) {
+    const locale = voice.Locale || voice.locale || "";
+    const name = voice.ShortName || voice.shortName || voice.voiceName || "";
+    const gender = voice.Gender || voice.gender || "";
+    return [name, locale, gender].filter(Boolean).join(" • ");
+  }
+
+  function getFilteredAzureVoices(lang) {
+    const normalized = normalizeLangTag(lang);
+    const base = normalized.split("-")[0];
+    return availableAzureVoices.filter((voice) => {
+      const locale = normalizeLangTag(voice.Locale || voice.locale);
+      return locale === normalized || locale.split("-")[0] === base;
+    });
+  }
+
+  function updateAzureVoiceOptions() {
+    const selectedValue = azureVoiceName.value;
+    const voices = getFilteredAzureVoices(targetLang.value);
+    azureVoiceName.innerHTML = "";
+
+    const autoOption = document.createElement("option");
+    autoOption.value = "";
+    autoOption.textContent = voices.length
+      ? "Auto Select for Target Language"
+      : "No Azure voices available for this language";
+    azureVoiceName.appendChild(autoOption);
+
+    voices
+      .sort((a, b) =>
+        getVoiceDisplayName(a).localeCompare(getVoiceDisplayName(b)),
+      )
+      .forEach((voice) => {
+        const option = document.createElement("option");
+        option.value = voice.ShortName || voice.shortName || "";
+        option.textContent = getVoiceDisplayName(voice);
+        azureVoiceName.appendChild(option);
+      });
+
+    const hasSelectedVoice = Array.from(azureVoiceName.options).some(
+      (option) => option.value === selectedValue,
+    );
+    azureVoiceName.value = hasSelectedVoice ? selectedValue : "";
+    azureVoiceName.disabled = ttsProvider.value !== "azure";
+  }
+
+  function refreshAzureVoices() {
+    const key = azureSpeechKey.value.trim();
+    const region = azureSpeechRegion.value.trim();
+
+    if (!key || !region) {
+      availableAzureVoices = [];
+      updateAzureVoiceOptions();
+      return;
+    }
+
+    chrome.runtime.sendMessage(
+      {
+        action: "getAzureVoices",
+        key,
+        region,
+      },
+      (response) => {
+        if (chrome.runtime.lastError) return;
+        if (!response || !response.success || !Array.isArray(response.voices)) {
+          availableAzureVoices = [];
+          updateAzureVoiceOptions();
+          return;
+        }
+
+        availableAzureVoices = response.voices;
+        updateAzureVoiceOptions();
+      },
+    );
+  }
 
   boldBtns.forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -99,12 +196,16 @@ document.addEventListener("DOMContentLoaded", () => {
       sourceLang: sourceLang.value,
       targetLang: targetLang.value,
       readAloud: readAloud.checked,
+      ttsProvider: ttsProvider.value,
+      azureVoiceName: azureVoiceName.value,
       hideSourceText: hideSourceText.checked,
       adaptiveOverlayPosition: adaptiveOverlayPosition.checked,
       sourceTextFactor: Number(sourceSizeFactor.value),
       targetTextFactor: Number(targetSizeFactor.value),
       boldText,
       sonioxKey: sonioxKey.value,
+      azureSpeechKey: azureSpeechKey.value.trim(),
+      azureSpeechRegion: azureSpeechRegion.value.trim(),
       style: {
         fontSize: fontSize.value,
         textColor: textColor.value,
@@ -120,11 +221,15 @@ document.addEventListener("DOMContentLoaded", () => {
       "sourceLang",
       "targetLang",
       "readAloud",
+      "ttsProvider",
+      "azureVoiceName",
       "hideSourceText",
       "adaptiveOverlayPosition",
       "sourceTextFactor",
       "targetTextFactor",
       "sonioxKey",
+      "azureSpeechKey",
+      "azureSpeechRegion",
       "boldText",
       "style",
     ],
@@ -138,6 +243,8 @@ document.addEventListener("DOMContentLoaded", () => {
       }
       if (res.targetLang) targetLang.value = res.targetLang;
       if (res.readAloud !== undefined) readAloud.checked = res.readAloud;
+      if (res.ttsProvider) ttsProvider.value = res.ttsProvider;
+      if (res.azureVoiceName) azureVoiceName.value = res.azureVoiceName;
       if (res.hideSourceText !== undefined)
         hideSourceText.checked = res.hideSourceText;
       if (res.adaptiveOverlayPosition !== undefined) {
@@ -151,6 +258,8 @@ document.addEventListener("DOMContentLoaded", () => {
         sonioxKey.value = res.sonioxKey;
         startSttBtn.style.display = "block";
       }
+      if (res.azureSpeechKey) azureSpeechKey.value = res.azureSpeechKey;
+      if (res.azureSpeechRegion) azureSpeechRegion.value = res.azureSpeechRegion;
       if (res.boldText) {
         boldText = res.boldText;
         boldBtns.forEach((b) => {
@@ -165,6 +274,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       setValueLabels();
       updateEnabledUiState();
+      refreshAzureVoices();
     },
   );
 
@@ -177,17 +287,22 @@ document.addEventListener("DOMContentLoaded", () => {
       sourceLang: settings.sourceLang,
       targetLang: settings.targetLang,
       readAloud: settings.readAloud,
+      ttsProvider: settings.ttsProvider,
+      azureVoiceName: settings.azureVoiceName,
       hideSourceText: settings.hideSourceText,
       adaptiveOverlayPosition: settings.adaptiveOverlayPosition,
       sourceTextFactor: settings.sourceTextFactor,
       targetTextFactor: settings.targetTextFactor,
       sonioxKey: settings.sonioxKey,
+      azureSpeechKey: settings.azureSpeechKey,
+      azureSpeechRegion: settings.azureSpeechRegion,
       boldText: settings.boldText,
       style: settings.style,
     });
 
     setValueLabels();
     updateEnabledUiState();
+    updateAzureVoiceOptions();
 
     if (sonioxKey.value) {
       startSttBtn.style.display = "block";
@@ -214,9 +329,19 @@ document.addEventListener("DOMContentLoaded", () => {
   sourceLang.addEventListener("change", saveSettings);
   targetLang.addEventListener("change", saveSettings);
   readAloud.addEventListener("change", saveSettings);
+  ttsProvider.addEventListener("change", saveSettings);
+  azureVoiceName.addEventListener("change", saveSettings);
   hideSourceText.addEventListener("change", saveSettings);
   adaptiveOverlayPosition.addEventListener("change", saveSettings);
   sonioxKey.addEventListener("input", saveSettings);
+  azureSpeechKey.addEventListener("input", () => {
+    refreshAzureVoices();
+    saveSettings();
+  });
+  azureSpeechRegion.addEventListener("input", () => {
+    refreshAzureVoices();
+    saveSettings();
+  });
   fontSize.addEventListener("input", saveSettings);
   textColor.addEventListener("input", saveSettings);
   bgOpacity.addEventListener("input", saveSettings);
@@ -239,6 +364,8 @@ document.addEventListener("DOMContentLoaded", () => {
         sourceLang: settings.sourceLang,
         targetLang: settings.targetLang,
         readAloud: settings.readAloud,
+        ttsProvider: settings.ttsProvider,
+        azureVoiceName: settings.azureVoiceName,
         hideSourceText: settings.hideSourceText,
         adaptiveOverlayPosition: settings.adaptiveOverlayPosition,
         sourceTextFactor: settings.sourceTextFactor,
@@ -266,4 +393,5 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   requestAvailableSourceLanguages();
+  refreshAzureVoices();
 });

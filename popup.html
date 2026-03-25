@@ -58,6 +58,21 @@
         </label>
       </div>
 
+      <div class="field-row">
+        <label class="field-label" for="tts-provider">TTS Source</label>
+        <select id="tts-provider">
+          <option value="azure">Azure Speech</option>
+          <option value="local">Chrome Local Voice</option>
+        </select>
+      </div>
+
+      <div class="compact-field-row">
+        <label class="field-label" for="azure-voice-name">Azure Voice</label>
+        <select id="azure-voice-name">
+          <option value="">Auto Select for Target Language</option>
+        </select>
+      </div>
+
       <div class="toggle-row">
         <span class="toggle-label">Show Only Target Language</span>
         <label class="toggle-switch">
@@ -78,6 +93,20 @@
         <label class="field-label" for="soniox-key">Soniox STT API Key (Optional)</label>
         <input type="password" id="soniox-key" placeholder="Enter API key for videos without subtitles" />
       </div>
+
+      <div class="field-row">
+        <label class="field-label" for="azure-speech-key">Azure Speech Key (Optional)</label>
+        <input type="password" id="azure-speech-key" placeholder="Used when no local TTS voice matches" />
+      </div>
+
+      <div class="compact-field-row">
+        <label class="field-label" for="azure-speech-region">Azure Speech Region</label>
+        <input type="text" id="azure-speech-region" placeholder="e.g. southeastasia" />
+      </div>
+
+      <p class="field-help">
+        Azure Speech is the default TTS engine. Chrome local voice is used only if you switch sources or Azure is unavailable.
+      </p>
 
       <button id="start-stt-btn" class="btn-secondary" style="display: none">
         Start STT

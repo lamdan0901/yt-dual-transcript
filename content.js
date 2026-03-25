@@ -3,6 +3,8 @@ let translationEnabled = true;
 let currentSourceLang = "auto";
 let currentTargetLang = "es";
 let readAloudEnabled = false;
+let currentTtsProvider = "azure";
+let currentAzureVoiceName = "";
 let hideSourceText = false;
 let sourceTextFactor = 0.8;
 let targetTextFactor = 1.2;
@@ -22,6 +24,32 @@ let lastSegOriginal = "";      // last raw segment text (for grow-detection)
 let lastSegTranslated = "";
 let isLineShiftAnimating = false;
 let pendingDisplayUpdate = false; // flag: re-render after animation ends
+let ttsSessionId = createTtsSessionId();
+let ttsChunkSeq = 0;
+let ttsPhraseBuffer = [];
+let ttsPhraseWordCount = 0;
+let ttsFlushTimer = null;
+let cloudAudioQueue = [];
+let cloudAudioUrl = null;
+let cloudAudioPlayer = null;
+let isCloudAudioPlaying = false;
+let pendingCloudAudio = new Map();
+let nextCloudChunkId = 1;
+let recentCommittedSegments = new Map();
+let lastQueuedSpeechText = "";
+let lastQueuedSpeechAt = 0;
+let transcriptIdleTimer = null;
+let lastPlaybackPaused = false;
+let recentSpokenChunks = [];
+
+const TTS_MIN_WORDS = 4;
+const TTS_IDLE_FLUSH_MS = 1200;
+const TTS_MAX_BUFFER_WORDS = 12;
+const SEGMENT_DEDUPE_MS = 2500;
+const SPEECH_DEDUPE_MS = 3000;
+const TTS_TRANSCRIPT_IDLE_MS = 1500;
+const SPOKEN_CHUNK_MEMORY_MS = 12000;
+const MIN_TRIMMED_SPEECH_WORDS = 2;
 
 // Handle SPA navigation on YouTube
 document.addEventListener("yt-navigate-finish", () => {
@@ -34,6 +62,7 @@ document.addEventListener("yt-navigate-finish", () => {
     lastSegTranslated = "";
     isLineShiftAnimating = false;
     pendingDisplayUpdate = false;
+    resetSpeechSession("navigation", true);
     teardownPlayerUiTracking();
     setupObserver();
     refreshOverlayPositionSoon();
@@ -47,6 +76,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     currentSourceLang = request.sourceLang || "auto";
     currentTargetLang = request.targetLang;
     readAloudEnabled = request.readAloud;
+    currentTtsProvider = request.ttsProvider || "azure";
+    currentAzureVoiceName = request.azureVoiceName || "";
     hideSourceText = Boolean(request.hideSourceText);
     sourceTextFactor = Number(request.sourceTextFactor || 0.8);
     targetTextFactor = Number(request.targetTextFactor || 1.2);
@@ -56,6 +87,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       currentStyle = request.style;
     }
 
+    resetSpeechSession("start-translation", true);
     setupObserver();
     createOverlay();
     if (translationEnabled) {
@@ -73,10 +105,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   } else if (request.action === "toggleTranslation") {
     translationEnabled = request.enabled !== false;
     if (translationEnabled) {
+      resetSpeechSession("translation-enabled", true);
       createOverlay();
       hideOriginalCaptions();
       updateOverlayStyle();
     } else {
+      resetSpeechSession("translation-disabled");
       clearOverlayText();
       hideOverlay();
       restoreOriginalCaptions();
@@ -87,10 +121,418 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+function createTtsSessionId() {
+  return `tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeLangTag(lang) {
+  if (!lang || typeof lang !== "string") return "";
+
+  const parts = lang
+    .trim()
+    .replace(/_/g, "-")
+    .split("-")
+    .filter(Boolean);
+
+  if (parts.length === 0) return "";
+
+  return parts
+    .map((part, index) => {
+      if (index === 0) return part.toLowerCase();
+      if (part.length === 2) return part.toUpperCase();
+      if (part.length === 4) {
+        return part[0].toUpperCase() + part.slice(1).toLowerCase();
+      }
+      return part.toLowerCase();
+    })
+    .join("-");
+}
+
+function clearTtsFlushTimer() {
+  if (ttsFlushTimer !== null) {
+    window.clearTimeout(ttsFlushTimer);
+    ttsFlushTimer = null;
+  }
+}
+
+function clearTranscriptIdleTimer() {
+  if (transcriptIdleTimer !== null) {
+    window.clearTimeout(transcriptIdleTimer);
+    transcriptIdleTimer = null;
+  }
+}
+
+function getCloudAudioPlayer() {
+  if (!cloudAudioPlayer) {
+    cloudAudioPlayer = new Audio();
+    cloudAudioPlayer.preload = "auto";
+    cloudAudioPlayer.addEventListener("ended", handleCloudAudioEnded);
+    cloudAudioPlayer.addEventListener("error", handleCloudAudioEnded);
+  }
+  return cloudAudioPlayer;
+}
+
+function revokeCloudAudioUrl() {
+  if (cloudAudioUrl) {
+    URL.revokeObjectURL(cloudAudioUrl);
+    cloudAudioUrl = null;
+  }
+}
+
+function clearCloudAudioQueue() {
+  cloudAudioQueue = [];
+  pendingCloudAudio = new Map();
+  nextCloudChunkId = 1;
+  isCloudAudioPlaying = false;
+  const player = getCloudAudioPlayer();
+  player.pause();
+  player.removeAttribute("src");
+  player.load();
+  revokeCloudAudioUrl();
+}
+
+function base64ToBlob(base64, contentType = "audio/mpeg") {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return new Blob([bytes], { type: contentType });
+}
+
+function handleCloudAudioEnded() {
+  revokeCloudAudioUrl();
+  isCloudAudioPlaying = false;
+  playNextCloudAudio();
+}
+
+function playNextCloudAudio() {
+  if (isCloudAudioPlaying || cloudAudioQueue.length === 0) return;
+
+  const nextItem = cloudAudioQueue.shift();
+  const player = getCloudAudioPlayer();
+  const blob = base64ToBlob(nextItem.audioBase64, nextItem.contentType);
+  cloudAudioUrl = URL.createObjectURL(blob);
+  player.src = cloudAudioUrl;
+  isCloudAudioPlaying = true;
+  player.play().catch((error) => {
+    console.error("Azure audio playback failed:", error);
+    handleCloudAudioEnded();
+  });
+}
+
+function enqueueCloudAudio(response) {
+  if (!response || !response.audioBase64) return;
+  pendingCloudAudio.set(response.chunkId, {
+    audioBase64: response.audioBase64,
+    contentType: response.contentType || "audio/mpeg",
+  });
+  queueReadyCloudAudio();
+}
+
+function queueReadyCloudAudio() {
+  while (pendingCloudAudio.has(nextCloudChunkId)) {
+    cloudAudioQueue.push(pendingCloudAudio.get(nextCloudChunkId));
+    pendingCloudAudio.delete(nextCloudChunkId);
+    nextCloudChunkId += 1;
+  }
+  playNextCloudAudio();
+}
+
+function skipCloudChunk(chunkId) {
+  if (chunkId !== nextCloudChunkId) return;
+  nextCloudChunkId += 1;
+  queueReadyCloudAudio();
+}
+
+function resetSpeechBuffer() {
+  clearTtsFlushTimer();
+  ttsPhraseBuffer = [];
+  ttsPhraseWordCount = 0;
+}
+
+function pruneRecentCommittedSegments(now = Date.now()) {
+  recentCommittedSegments.forEach((timestamp, key) => {
+    if (now - timestamp > SEGMENT_DEDUPE_MS) {
+      recentCommittedSegments.delete(key);
+    }
+  });
+}
+
+function markSegmentCommitted(originalText, targetLang) {
+  const normalizedText = String(originalText || "").replace(/\s+/g, " ").trim();
+  if (!normalizedText) return false;
+
+  const now = Date.now();
+  const commitKey = `${normalizeLangTag(targetLang)}::${normalizedText}`;
+  pruneRecentCommittedSegments(now);
+
+  const lastCommittedAt = recentCommittedSegments.get(commitKey);
+  if (lastCommittedAt && now - lastCommittedAt < SEGMENT_DEDUPE_MS) {
+    return false;
+  }
+
+  recentCommittedSegments.set(commitKey, now);
+  return true;
+}
+
+function shouldSkipQueuedSpeech(text) {
+  const normalizedText = String(text || "").replace(/\s+/g, " ").trim();
+  const now = Date.now();
+  if (
+    normalizedText &&
+    normalizedText === lastQueuedSpeechText &&
+    now - lastQueuedSpeechAt < SPEECH_DEDUPE_MS
+  ) {
+    return true;
+  }
+
+  lastQueuedSpeechText = normalizedText;
+  lastQueuedSpeechAt = now;
+  return false;
+}
+
+function appendTranslatedSegment(originalText, translatedText) {
+  if (!markSegmentCommitted(originalText, currentTargetLang)) {
+    return false;
+  }
+
+  lastSegTranslated = translatedText;
+  rollingTranslated = rollingTranslated
+    ? rollingTranslated + " " + translatedText
+    : translatedText;
+  updateOverlayText(rollingOriginal, rollingTranslated, true);
+
+  const vid = document.querySelector("video");
+  const t = vid ? vid.currentTime : 0;
+  translatedHistory.push({
+    start: t,
+    end: t + 2,
+    original: originalText,
+    translated: translatedText,
+  });
+
+  return true;
+}
+
+function tokenizeSpeechText(text) {
+  return String(text || "")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s']/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean);
+}
+
+function pruneRecentSpokenChunks(now = Date.now()) {
+  recentSpokenChunks = recentSpokenChunks.filter(
+    (item) => now - item.at <= SPOKEN_CHUNK_MEMORY_MS,
+  );
+}
+
+function longestSuffixPrefixOverlap(prevTokens, nextTokens) {
+  const maxPossible = Math.min(prevTokens.length, nextTokens.length);
+  for (let size = maxPossible; size >= 1; size -= 1) {
+    let matches = true;
+    for (let i = 0; i < size; i += 1) {
+      if (prevTokens[prevTokens.length - size + i] !== nextTokens[i]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return size;
+  }
+  return 0;
+}
+
+function registerSpokenChunk(text) {
+  const tokens = tokenizeSpeechText(text);
+  if (tokens.length === 0) return;
+
+  const now = Date.now();
+  pruneRecentSpokenChunks(now);
+  recentSpokenChunks.push({ at: now, text: tokens.join(" "), tokens });
+}
+
+function reduceRepeatedSpeech(text) {
+  const original = String(text || "").replace(/\s+/g, " ").trim();
+  if (!original) return "";
+
+  const now = Date.now();
+  pruneRecentSpokenChunks(now);
+  const tokens = tokenizeSpeechText(original);
+  if (tokens.length === 0) return "";
+
+  let skipWholeChunk = false;
+  let bestOverlap = 0;
+
+  for (let i = recentSpokenChunks.length - 1; i >= 0; i -= 1) {
+    const prev = recentSpokenChunks[i];
+    if (tokens.join(" ") === prev.text) {
+      skipWholeChunk = true;
+      break;
+    }
+
+    const overlap = longestSuffixPrefixOverlap(prev.tokens, tokens);
+    if (overlap > bestOverlap) {
+      bestOverlap = overlap;
+    }
+  }
+
+  if (skipWholeChunk) return "";
+  if (bestOverlap <= 0) return original;
+
+  const originalWords = original.split(/\s+/);
+  const trimmedWords = originalWords.slice(bestOverlap);
+  if (trimmedWords.length < MIN_TRIMMED_SPEECH_WORDS) {
+    return "";
+  }
+
+  return trimmedWords.join(" ");
+}
+
+function resetSpeechSession(reason = "reset", preserveLang = false) {
+  resetSpeechBuffer();
+  clearTranscriptIdleTimer();
+  clearCloudAudioQueue();
+  recentCommittedSegments = new Map();
+  lastQueuedSpeechText = "";
+  lastQueuedSpeechAt = 0;
+  recentSpokenChunks = [];
+  ttsChunkSeq = 0;
+  ttsSessionId = createTtsSessionId();
+  chrome.runtime.sendMessage({
+    action: "resetTtsQueue",
+    sessionId: ttsSessionId,
+    targetLang: preserveLang ? currentTargetLang : undefined,
+    reason,
+  });
+}
+
+function scheduleTranscriptIdleStop() {
+  clearTranscriptIdleTimer();
+  transcriptIdleTimer = window.setTimeout(() => {
+    if (!isTranslating || !translationEnabled || !readAloudEnabled) return;
+    resetSpeechSession("transcript-idle", true);
+  }, TTS_TRANSCRIPT_IDLE_MS);
+}
+
+function handlePlaybackStateChange() {
+  const videoEl = document.querySelector("video");
+  const isPaused = Boolean(videoEl && videoEl.paused);
+
+  if (isPaused) {
+    clearTranscriptIdleTimer();
+    if (!lastPlaybackPaused && isTranslating && readAloudEnabled) {
+      resetSpeechSession("video-paused", true);
+    }
+  } else if (lastPlaybackPaused && isTranslating && translationEnabled) {
+    resetSpeechSession("video-resumed", true);
+  }
+
+  lastPlaybackPaused = isPaused;
+}
+
+function countWords(text) {
+  return text.trim().split(/\s+/).filter(Boolean).length;
+}
+
+function shouldFlushSpeechBuffer(text) {
+  if (/[.!?…。！？]$/.test(text)) return true;
+  if (/[,:;]\s*$/.test(text) && ttsPhraseWordCount >= TTS_MIN_WORDS) return true;
+  if (ttsPhraseWordCount >= TTS_MAX_BUFFER_WORDS) return true;
+  return false;
+}
+
+function flushSpeechBuffer(reason = "manual") {
+  clearTtsFlushTimer();
+  const text = ttsPhraseBuffer.join(" ").replace(/\s+/g, " ").trim();
+  if (!text || !readAloudEnabled || !translationEnabled) {
+    resetSpeechBuffer();
+    return;
+  }
+  const dedupedText = reduceRepeatedSpeech(text);
+  if (!dedupedText) {
+    resetSpeechBuffer();
+    return;
+  }
+  if (shouldSkipQueuedSpeech(dedupedText)) {
+    resetSpeechBuffer();
+    return;
+  }
+
+  const payload = {
+    action: "speak",
+    text: dedupedText,
+    targetLang: normalizeLangTag(currentTargetLang),
+    ttsProvider: currentTtsProvider,
+    azureVoiceName: currentAzureVoiceName,
+    sessionId: ttsSessionId,
+    chunkId: ++ttsChunkSeq,
+    reason,
+  };
+  const requestSessionId = payload.sessionId;
+
+  chrome.runtime.sendMessage(payload, (response) => {
+    if (chrome.runtime.lastError) return;
+    if (requestSessionId !== ttsSessionId) return;
+    if (!response) return;
+    if (response.mode === "azure-audio") {
+      enqueueCloudAudio(response);
+      console.debug("Transcript TTS queued via Azure", response);
+    } else if (!response.success) {
+      if (
+        typeof response.chunkId === "number" &&
+        (String(response.reason || "").startsWith("azure-") ||
+          String(response.fallback || "").startsWith("azure-"))
+      ) {
+        skipCloudChunk(response.chunkId);
+      }
+      console.warn("Transcript TTS skipped", response);
+    } else {
+      console.debug("Transcript TTS queued", response);
+    }
+  });
+
+  registerSpokenChunk(dedupedText);
+  resetSpeechBuffer();
+}
+
+function queueSpeechText(text, options = {}) {
+  if (!readAloudEnabled || !translationEnabled) return;
+
+  const normalizedText = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalizedText) return;
+
+  ttsPhraseBuffer.push(normalizedText);
+  ttsPhraseWordCount += countWords(normalizedText);
+
+  if (options.flush || shouldFlushSpeechBuffer(normalizedText)) {
+    flushSpeechBuffer(options.reason || "phrase-ready");
+    return;
+  }
+
+  clearTtsFlushTimer();
+  ttsFlushTimer = window.setTimeout(() => {
+    flushSpeechBuffer("idle-timeout");
+  }, TTS_IDLE_FLUSH_MS);
+}
+
 function applySettings(settings) {
+  const previousTargetLang = currentTargetLang;
+  const previousReadAloud = readAloudEnabled;
+  const previousTranslationEnabled = translationEnabled;
+  const previousTtsProvider = currentTtsProvider;
+  const previousAzureVoiceName = currentAzureVoiceName;
+
   if (settings.sourceLang) currentSourceLang = settings.sourceLang;
   if (settings.targetLang) currentTargetLang = settings.targetLang;
   if (settings.readAloud !== undefined) readAloudEnabled = settings.readAloud;
+  if (settings.ttsProvider) currentTtsProvider = settings.ttsProvider;
+  if (settings.azureVoiceName !== undefined) {
+    currentAzureVoiceName = settings.azureVoiceName;
+  }
   if (settings.hideSourceText !== undefined)
     hideSourceText = Boolean(settings.hideSourceText);
   if (settings.sourceTextFactor !== undefined)
@@ -104,6 +546,34 @@ function applySettings(settings) {
   }
   if (settings.boldText) boldText = settings.boldText;
   if (settings.style) currentStyle = settings.style;
+
+  const targetLangChanged =
+    normalizeLangTag(previousTargetLang) !== normalizeLangTag(currentTargetLang);
+  const ttsDisabled = previousReadAloud && !readAloudEnabled;
+  const translationDisabled = previousTranslationEnabled && !translationEnabled;
+  const ttsProviderChanged = previousTtsProvider !== currentTtsProvider;
+  const azureVoiceChanged = previousAzureVoiceName !== currentAzureVoiceName;
+
+  if (
+    targetLangChanged ||
+    ttsDisabled ||
+    translationDisabled ||
+    ttsProviderChanged ||
+    azureVoiceChanged
+  ) {
+    resetSpeechSession(
+      targetLangChanged
+        ? "target-language-changed"
+        : ttsDisabled
+          ? "tts-disabled"
+          : translationDisabled
+            ? "translation-disabled"
+            : ttsProviderChanged
+              ? "tts-provider-changed"
+              : "azure-voice-changed",
+      Boolean(readAloudEnabled && translationEnabled),
+    );
+  }
 
   updateOverlayStyle();
 }
@@ -166,8 +636,8 @@ function teardownPlayerUiTracking() {
     playerUiObserver = null;
   }
 
-  playerUiListeners.forEach(({ element, eventName }) => {
-    element.removeEventListener(eventName, refreshOverlayPositionSoon);
+  playerUiListeners.forEach(({ element, eventName, handler }) => {
+    element.removeEventListener(eventName, handler);
   });
   playerUiListeners = [];
 
@@ -175,6 +645,8 @@ function teardownPlayerUiTracking() {
     window.clearTimeout(playerUiUpdateTimer);
     playerUiUpdateTimer = null;
   }
+
+  clearTranscriptIdleTimer();
 }
 
 function bindPlayerUiTracking(player, videoEl) {
@@ -191,18 +663,23 @@ function bindPlayerUiTracking(player, videoEl) {
 
   playerEvents.forEach((eventName) => {
     if (!player) return;
-    player.addEventListener(eventName, refreshOverlayPositionSoon, {
+    const handler = refreshOverlayPositionSoon;
+    player.addEventListener(eventName, handler, {
       passive: true,
     });
-    playerUiListeners.push({ element: player, eventName });
+    playerUiListeners.push({ element: player, eventName, handler });
   });
 
   videoEvents.forEach((eventName) => {
     if (!videoEl) return;
-    videoEl.addEventListener(eventName, refreshOverlayPositionSoon, {
+    const handler = () => {
+      refreshOverlayPositionSoon();
+      handlePlaybackStateChange();
+    };
+    videoEl.addEventListener(eventName, handler, {
       passive: true,
     });
-    playerUiListeners.push({ element: videoEl, eventName });
+    playerUiListeners.push({ element: videoEl, eventName, handler });
   });
 
   if (player) {
@@ -452,6 +929,7 @@ function clearOverlayText() {
   lastSegTranslated = "";
   isLineShiftAnimating = false;
   pendingDisplayUpdate = false;
+  resetSpeechBuffer();
 }
 
 function hideOverlay() {
@@ -459,16 +937,25 @@ function hideOverlay() {
   if (overlay) {
     overlay.style.display = "none";
   }
+
+  handlePlaybackStateChange();
 }
 
-async function translateText(text) {
+function isCurrentTtsContext(sessionId, targetLang) {
+  return (
+    sessionId === ttsSessionId &&
+    normalizeLangTag(targetLang) === normalizeLangTag(currentTargetLang)
+  );
+}
+
+async function translateText(text, targetLangOverride = currentTargetLang) {
   return new Promise((resolve) => {
     chrome.runtime.sendMessage(
       {
         action: "translate",
         text: text,
         sourceLang: currentSourceLang,
-        targetLang: currentTargetLang,
+        targetLang: targetLangOverride,
       },
       (response) => {
         resolve(response ? response.translatedText : text);
@@ -478,12 +965,7 @@ async function translateText(text) {
 }
 
 function speakText(text) {
-  if (!readAloudEnabled) return;
-  chrome.runtime.sendMessage({
-    action: "speak",
-    text: text,
-    lang: currentTargetLang,
-  });
+  queueSpeechText(text);
 }
 
 function setupObserver() {
@@ -509,6 +991,8 @@ function setupObserver() {
       restoreOriginalCaptions();
       return;
     }
+
+    scheduleTranscriptIdleStop();
 
     let currentText = "";
     const segments = captionContainer.querySelectorAll(".ytp-caption-segment");
@@ -554,22 +1038,12 @@ function setupObserver() {
           // Fire-and-forget: translate the completed segment, then update
           // the translated line. Original line keeps growing independently.
           (async () => {
-            const translated = await translateText(prevSeg);
-            lastSegTranslated = translated;
-            rollingTranslated = rollingTranslated
-              ? rollingTranslated + " " + translated
-              : translated;
-            updateOverlayText(rollingOriginal, rollingTranslated, true);
+            const requestSessionId = ttsSessionId;
+            const requestTargetLang = currentTargetLang;
+            const translated = await translateText(prevSeg, requestTargetLang);
+            if (!isCurrentTtsContext(requestSessionId, requestTargetLang)) return;
+            if (!appendTranslatedSegment(prevSeg, translated)) return;
             speakText(translated);
-
-            const vid = document.querySelector("video");
-            const t = vid ? vid.currentTime : 0;
-            translatedHistory.push({
-              start: t,
-              end: t + 2,
-              original: prevSeg,
-              translated,
-            });
           })();
         }
       }
@@ -580,16 +1054,13 @@ function setupObserver() {
       if (lastSegOriginal) {
         const finalSeg = lastSegOriginal;
         (async () => {
-          const translated = await translateText(finalSeg);
+          const requestSessionId = ttsSessionId;
+          const requestTargetLang = currentTargetLang;
+          const translated = await translateText(finalSeg, requestTargetLang);
+          if (!isCurrentTtsContext(requestSessionId, requestTargetLang)) return;
+          if (!appendTranslatedSegment(finalSeg, translated)) return;
           speakText(translated);
-          const vid = document.querySelector("video");
-          const t = vid ? vid.currentTime : 0;
-          translatedHistory.push({
-            start: t,
-            end: t + 2,
-            original: finalSeg,
-            translated,
-          });
+          flushSpeechBuffer("caption-clear");
         })();
       }
       clearOverlayText();
