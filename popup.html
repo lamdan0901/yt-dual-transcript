@@ -5,11 +5,12 @@
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
-
     <!-- Header -->
     <div class="popup-header">
       <span class="brand-icon">▶</span>
-      <span class="brand-text">YT Translate <span class="brand-accent">&amp; Speak</span></span>
+      <span class="brand-text"
+        >YT Translate <span class="brand-accent">&amp; Speak</span></span
+      >
     </div>
 
     <!-- Group 1: Translation -->
@@ -90,22 +91,41 @@
       </div>
 
       <div class="field-row">
-        <label class="field-label" for="soniox-key">Soniox STT API Key (Optional)</label>
-        <input type="password" id="soniox-key" placeholder="Enter API key for videos without subtitles" />
+        <label class="field-label" for="soniox-key"
+          >Soniox STT API Key (Optional)</label
+        >
+        <input
+          type="password"
+          id="soniox-key"
+          placeholder="Enter API key for videos without subtitles"
+        />
       </div>
 
       <div class="field-row">
-        <label class="field-label" for="azure-speech-key">Azure Speech Key (Optional)</label>
-        <input type="password" id="azure-speech-key" placeholder="Used when no local TTS voice matches" />
+        <label class="field-label" for="azure-speech-key"
+          >Azure Speech Key (Optional)</label
+        >
+        <input
+          type="password"
+          id="azure-speech-key"
+          placeholder="Used when no local TTS voice matches"
+        />
       </div>
 
       <div class="compact-field-row">
-        <label class="field-label" for="azure-speech-region">Azure Speech Region</label>
-        <input type="text" id="azure-speech-region" placeholder="e.g. southeastasia" />
+        <label class="field-label" for="azure-speech-region"
+          >Azure Speech Region</label
+        >
+        <input
+          type="text"
+          id="azure-speech-region"
+          placeholder="e.g. southeastasia"
+        />
       </div>
 
       <p class="field-help">
-        Azure Speech is the default TTS engine. Chrome local voice is used only if you switch sources or Azure is unavailable.
+        Azure Speech is the default TTS engine. Chrome local voice is used only
+        if you switch sources or Azure is unavailable.
       </p>
 
       <button id="start-stt-btn" class="btn-secondary" style="display: none">
@@ -126,7 +146,9 @@
       </div>
 
       <div class="color-row">
-        <label class="field-label" for="text-color" style="margin-bottom: 0">Text Color</label>
+        <label class="field-label" for="text-color" style="margin-bottom: 0"
+          >Text Color</label
+        >
         <input type="color" id="text-color" value="#ffffff" />
       </div>
 
@@ -139,26 +161,50 @@
       </div>
 
       <div class="bold-row">
-        <label class="field-label">Bold / Highlight</label>
+        <label class="field-bold-label">Bold / Highlight</label>
         <div class="bold-group">
-          <button class="bold-btn" data-value="source" id="bold-source">Source</button>
-          <button class="bold-btn active" data-value="target" id="bold-target">Target</button>
-          <button class="bold-btn" data-value="both" id="bold-both">Both</button>
+          <button class="bold-btn" data-value="source" id="bold-source">
+            Source
+          </button>
+          <button class="bold-btn active" data-value="target" id="bold-target">
+            Target
+          </button>
+          <button class="bold-btn" data-value="both" id="bold-both">
+            Both
+          </button>
         </div>
       </div>
 
       <div class="slider-row">
-        <label class="field-label" for="source-size-factor">Source Text Scale</label>
+        <label class="field-label" for="source-size-factor"
+          >Source Text Scale</label
+        >
         <div class="slider-control">
-          <input type="range" id="source-size-factor" min="0.5" max="2" step="0.1" value="0.8" />
+          <input
+            type="range"
+            id="source-size-factor"
+            min="0.5"
+            max="2"
+            step="0.1"
+            value="0.8"
+          />
           <span class="value-text" id="source-size-value">0.8x</span>
         </div>
       </div>
 
       <div class="slider-row">
-        <label class="field-label" for="target-size-factor">Target Text Scale</label>
+        <label class="field-label" for="target-size-factor"
+          >Target Text Scale</label
+        >
         <div class="slider-control">
-          <input type="range" id="target-size-factor" min="0.5" max="2" step="0.1" value="1.2" />
+          <input
+            type="range"
+            id="target-size-factor"
+            min="0.5"
+            max="2"
+            step="0.1"
+            value="1.2"
+          />
           <span class="value-text" id="target-size-value">1.2x</span>
         </div>
       </div>

@@ -21,6 +21,7 @@ let lastOverlayBottom = "";
 let rollingOriginal = "";      // accumulated display buffer
 let rollingTranslated = "";
 let lastSegOriginal = "";      // last raw segment text (for grow-detection)
+let segmentStableTimer = null; // fires translation when segment stops changing
 let lastSegTranslated = "";
 let isLineShiftAnimating = false;
 let pendingDisplayUpdate = false; // flag: re-render after animation ends
@@ -60,6 +61,7 @@ document.addEventListener("yt-navigate-finish", () => {
     rollingTranslated = "";
     lastSegOriginal = "";
     lastSegTranslated = "";
+    clearSegmentStableTimer();
     isLineShiftAnimating = false;
     pendingDisplayUpdate = false;
     resetSpeechSession("navigation", true);
@@ -416,6 +418,28 @@ function scheduleTranscriptIdleStop() {
     if (!isTranslating || !translationEnabled || !readAloudEnabled) return;
     resetSpeechSession("transcript-idle", true);
   }, TTS_TRANSCRIPT_IDLE_MS);
+}
+
+function clearSegmentStableTimer() {
+  if (segmentStableTimer) { clearTimeout(segmentStableTimer); segmentStableTimer = null; }
+}
+
+function scheduleSegmentStableTranslation() {
+  clearSegmentStableTimer();
+  segmentStableTimer = setTimeout(() => {
+    segmentStableTimer = null;
+    if (!isTranslating || !translationEnabled) return;
+    if (!lastSegOriginal) return;
+    const seg = lastSegOriginal;
+    const requestSessionId = ttsSessionId;
+    const requestTargetLang = currentTargetLang;
+    (async () => {
+      const translated = await translateText(seg, requestTargetLang);
+      if (!isCurrentTtsContext(requestSessionId, requestTargetLang)) return;
+      if (!appendTranslatedSegment(seg, translated)) return;
+      speakText(translated);
+    })();
+  }, 400);
 }
 
 function handlePlaybackStateChange() {
@@ -927,6 +951,7 @@ function clearOverlayText() {
   rollingTranslated = "";
   lastSegOriginal = "";
   lastSegTranslated = "";
+  clearSegmentStableTimer();
   isLineShiftAnimating = false;
   pendingDisplayUpdate = false;
   resetSpeechBuffer();
@@ -1021,17 +1046,19 @@ function setupObserver() {
           // Update original line immediately — no translation, no flicker
           updateOverlayText(rollingOriginal, rollingTranslated, true);
         }
+        // Reset stable timer — segment is still growing
+        scheduleSegmentStableTranslation();
       } else {
         // ── New segment detected ────────────────────────────────────────────
         // prevSeg (if any) is now fully complete — translate it.
         // currentText is the first word(s) of the brand-new segment.
+        clearSegmentStableTimer();
         lastOriginalText = currentText;
         lastSegOriginal = currentText;
 
-        // Show the new segment's first word(s) in the original line immediately
-        rollingOriginal = rollingOriginal
-          ? rollingOriginal + " " + currentText
-          : currentText;
+        // Reset overlay to show only the new segment (1:1 match with caption)
+        rollingOriginal = currentText;
+        rollingTranslated = "";
         updateOverlayText(rollingOriginal, rollingTranslated, true);
 
         if (prevSeg) {
@@ -1046,11 +1073,15 @@ function setupObserver() {
             speakText(translated);
           })();
         }
+        // Start stable timer for the new segment (handles manual transcripts
+        // where the full line appears at once and never grows)
+        scheduleSegmentStableTranslation();
       }
 
       hideOriginalCaptions();
     } else if (!currentText && lastOriginalText !== "") {
       // Captions cleared — commit the last in-progress segment to history
+      clearSegmentStableTimer();
       if (lastSegOriginal) {
         const finalSeg = lastSegOriginal;
         (async () => {
