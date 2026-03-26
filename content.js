@@ -27,9 +27,11 @@ let isLineShiftAnimating = false;
 let pendingDisplayUpdate = false; // flag: re-render after animation ends
 let ttsSessionId = createTtsSessionId();
 let ttsChunkSeq = 0;
-let ttsPhraseBuffer = [];
-let ttsPhraseWordCount = 0;
-let ttsFlushTimer = null;
+let pendingSpeechSegments = [];
+let speechBufferStartedAt = 0;
+let speechBufferUpdatedAt = 0;
+let speechSoftFlushTimer = null;
+let speechHardFlushTimer = null;
 let cloudAudioQueue = [];
 let cloudAudioUrl = null;
 let cloudAudioPlayer = null;
@@ -41,16 +43,17 @@ let lastQueuedSpeechText = "";
 let lastQueuedSpeechAt = 0;
 let transcriptIdleTimer = null;
 let lastPlaybackPaused = false;
+let lastPlaybackSeeking = false;
 let recentSpokenChunks = [];
 
-const TTS_MIN_WORDS = 4;
-const TTS_IDLE_FLUSH_MS = 1200;
-const TTS_MAX_BUFFER_WORDS = 12;
 const SEGMENT_DEDUPE_MS = 2500;
 const SPEECH_DEDUPE_MS = 3000;
 const TTS_TRANSCRIPT_IDLE_MS = 1500;
 const SPOKEN_CHUNK_MEMORY_MS = 12000;
 const MIN_TRIMMED_SPEECH_WORDS = 2;
+const SPEECH_SOFT_FLUSH_MS = 900;
+const SPEECH_HARD_FLUSH_MS = 2400;
+const SPEECH_MAX_CHARS = 220;
 
 // Handle SPA navigation on YouTube
 document.addEventListener("yt-navigate-finish", () => {
@@ -150,10 +153,15 @@ function normalizeLangTag(lang) {
     .join("-");
 }
 
-function clearTtsFlushTimer() {
-  if (ttsFlushTimer !== null) {
-    window.clearTimeout(ttsFlushTimer);
-    ttsFlushTimer = null;
+function clearSpeechFlushTimers() {
+  if (speechSoftFlushTimer !== null) {
+    window.clearTimeout(speechSoftFlushTimer);
+    speechSoftFlushTimer = null;
+  }
+
+  if (speechHardFlushTimer !== null) {
+    window.clearTimeout(speechHardFlushTimer);
+    speechHardFlushTimer = null;
   }
 }
 
@@ -247,10 +255,11 @@ function skipCloudChunk(chunkId) {
   queueReadyCloudAudio();
 }
 
-function resetSpeechBuffer() {
-  clearTtsFlushTimer();
-  ttsPhraseBuffer = [];
-  ttsPhraseWordCount = 0;
+function resetPendingSpeechSegments() {
+  clearSpeechFlushTimers();
+  pendingSpeechSegments = [];
+  speechBufferStartedAt = 0;
+  speechBufferUpdatedAt = 0;
 }
 
 function pruneRecentCommittedSegments(now = Date.now()) {
@@ -357,7 +366,7 @@ function registerSpokenChunk(text) {
   recentSpokenChunks.push({ at: now, text: tokens.join(" "), tokens });
 }
 
-function reduceRepeatedSpeech(text) {
+function reduceRepeatedSpeech(text, segmentCount = 1) {
   const original = String(text || "").replace(/\s+/g, " ").trim();
   if (!original) return "";
 
@@ -384,6 +393,7 @@ function reduceRepeatedSpeech(text) {
 
   if (skipWholeChunk) return "";
   if (bestOverlap <= 0) return original;
+  if (segmentCount <= 1) return original;
 
   const originalWords = original.split(/\s+/);
   const trimmedWords = originalWords.slice(bestOverlap);
@@ -395,7 +405,7 @@ function reduceRepeatedSpeech(text) {
 }
 
 function resetSpeechSession(reason = "reset", preserveLang = false) {
-  resetSpeechBuffer();
+  resetPendingSpeechSegments();
   clearTranscriptIdleTimer();
   clearCloudAudioQueue();
   recentCommittedSegments = new Map();
@@ -416,7 +426,9 @@ function scheduleTranscriptIdleStop() {
   clearTranscriptIdleTimer();
   transcriptIdleTimer = window.setTimeout(() => {
     if (!isTranslating || !translationEnabled || !readAloudEnabled) return;
-    resetSpeechSession("transcript-idle", true);
+    if (pendingSpeechSegments.length > 0) {
+      flushSpeechBuffer("transcript-idle");
+    }
   }, TTS_TRANSCRIPT_IDLE_MS);
 }
 
@@ -442,9 +454,18 @@ function scheduleSegmentStableTranslation() {
   }, 400);
 }
 
-function handlePlaybackStateChange() {
+function handlePlaybackStateChange(eventName = "") {
   const videoEl = document.querySelector("video");
   const isPaused = Boolean(videoEl && videoEl.paused);
+  const isSeeking = Boolean(videoEl && videoEl.seeking);
+
+  if (
+    (eventName === "seeking" || (isSeeking && !lastPlaybackSeeking)) &&
+    isTranslating &&
+    readAloudEnabled
+  ) {
+    resetSpeechSession("video-seeking", true);
+  }
 
   if (isPaused) {
     clearTranscriptIdleTimer();
@@ -456,33 +477,60 @@ function handlePlaybackStateChange() {
   }
 
   lastPlaybackPaused = isPaused;
+  lastPlaybackSeeking = isSeeking;
 }
 
-function countWords(text) {
-  return text.trim().split(/\s+/).filter(Boolean).length;
+function getPendingSpeechText() {
+  return pendingSpeechSegments
+    .map((segment) => segment.text)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-function shouldFlushSpeechBuffer(text) {
+function shouldFlushSpeechNow(text) {
+  if (!text) return false;
   if (/[.!?…。！？]$/.test(text)) return true;
-  if (/[,:;]\s*$/.test(text) && ttsPhraseWordCount >= TTS_MIN_WORDS) return true;
-  if (ttsPhraseWordCount >= TTS_MAX_BUFFER_WORDS) return true;
+  if (text.length >= SPEECH_MAX_CHARS) return true;
   return false;
 }
 
+function scheduleSpeechFlushTimers() {
+  clearSpeechFlushTimers();
+  if (pendingSpeechSegments.length === 0) return;
+
+  const now = Date.now();
+  const expectedUpdatedAt = speechBufferUpdatedAt;
+  const hardDelay = Math.max(
+    0,
+    SPEECH_HARD_FLUSH_MS - Math.max(0, now - speechBufferStartedAt),
+  );
+
+  speechSoftFlushTimer = window.setTimeout(() => {
+    if (speechBufferUpdatedAt !== expectedUpdatedAt) return;
+    flushSpeechBuffer("soft-timeout");
+  }, SPEECH_SOFT_FLUSH_MS);
+
+  speechHardFlushTimer = window.setTimeout(() => {
+    flushSpeechBuffer("hard-timeout");
+  }, hardDelay);
+}
+
 function flushSpeechBuffer(reason = "manual") {
-  clearTtsFlushTimer();
-  const text = ttsPhraseBuffer.join(" ").replace(/\s+/g, " ").trim();
+  clearSpeechFlushTimers();
+  const text = getPendingSpeechText();
+  const segmentCount = pendingSpeechSegments.length;
   if (!text || !readAloudEnabled || !translationEnabled) {
-    resetSpeechBuffer();
+    resetPendingSpeechSegments();
     return;
   }
-  const dedupedText = reduceRepeatedSpeech(text);
+  const dedupedText = reduceRepeatedSpeech(text, segmentCount);
   if (!dedupedText) {
-    resetSpeechBuffer();
+    resetPendingSpeechSegments();
     return;
   }
   if (shouldSkipQueuedSpeech(dedupedText)) {
-    resetSpeechBuffer();
+    resetPendingSpeechSegments();
     return;
   }
 
@@ -520,7 +568,7 @@ function flushSpeechBuffer(reason = "manual") {
   });
 
   registerSpokenChunk(dedupedText);
-  resetSpeechBuffer();
+  resetPendingSpeechSegments();
 }
 
 function queueSpeechText(text, options = {}) {
@@ -529,18 +577,23 @@ function queueSpeechText(text, options = {}) {
   const normalizedText = String(text || "").replace(/\s+/g, " ").trim();
   if (!normalizedText) return;
 
-  ttsPhraseBuffer.push(normalizedText);
-  ttsPhraseWordCount += countWords(normalizedText);
+  const now = Date.now();
+  pendingSpeechSegments.push({
+    text: normalizedText,
+    addedAt: now,
+  });
+  if (!speechBufferStartedAt) {
+    speechBufferStartedAt = now;
+  }
+  speechBufferUpdatedAt = now;
 
-  if (options.flush || shouldFlushSpeechBuffer(normalizedText)) {
+  const pendingText = getPendingSpeechText();
+  if (options.flush || shouldFlushSpeechNow(pendingText)) {
     flushSpeechBuffer(options.reason || "phrase-ready");
     return;
   }
 
-  clearTtsFlushTimer();
-  ttsFlushTimer = window.setTimeout(() => {
-    flushSpeechBuffer("idle-timeout");
-  }, TTS_IDLE_FLUSH_MS);
+  scheduleSpeechFlushTimers();
 }
 
 function applySettings(settings) {
@@ -698,7 +751,7 @@ function bindPlayerUiTracking(player, videoEl) {
     if (!videoEl) return;
     const handler = () => {
       refreshOverlayPositionSoon();
-      handlePlaybackStateChange();
+      handlePlaybackStateChange(eventName);
     };
     videoEl.addEventListener(eventName, handler, {
       passive: true,
@@ -954,7 +1007,6 @@ function clearOverlayText() {
   clearSegmentStableTimer();
   isLineShiftAnimating = false;
   pendingDisplayUpdate = false;
-  resetSpeechBuffer();
 }
 
 function hideOverlay() {
@@ -1093,6 +1145,8 @@ function setupObserver() {
           speakText(translated);
           flushSpeechBuffer("caption-clear");
         })();
+      } else if (pendingSpeechSegments.length > 0) {
+        flushSpeechBuffer("caption-clear");
       }
       clearOverlayText();
       lastOriginalText = "";
